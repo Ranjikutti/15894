@@ -961,3 +961,67 @@ Still, that tradeoff is worth it. At placement-season scale, reliability matters
 ## Stage 5 Summary
 
 The current implementation is too synchronous and too fragile for 50,000 students. I would split persistence from delivery, save the notification first, and send email plus in-app delivery through a background queue. If 200 emails fail, those should be retried separately instead of pulling down the whole batch. Saving to the database and sending the email should stay separate because they fail in different ways and they do not need to happen at the exact same moment.
+
+# Stage 6
+
+## Priority Inbox Idea
+
+For this stage, I would treat the inbox like a small live ranking problem. The goal is to keep the top `n` unread notifications at the front, where the importance comes from two things working together:
+
+- type weight, where `Placement` is higher than `Result`, and `Result` is higher than `Event`
+- recency, so newer notifications of the same type should appear first
+
+That gives us a list that feels useful to the student instead of just being sorted by time.
+
+## Approach
+
+I used a small min-heap to keep only the top 10 notifications while reading the API data.
+
+Why a heap works well here:
+
+- it does not need to sort the full list every time
+- it keeps the best 10 items with very little extra work
+- when a new notification arrives, we only compare it with the weakest item in the current top 10
+
+That makes the update path efficient and easy to maintain as new notifications keep coming in.
+
+## Ranking Rule
+
+The ranking is simple:
+
+1. `Placement`
+2. `Result`
+3. `Event`
+4. For the same type, the newer timestamp wins
+
+So a recent `Placement` notification will always beat a recent `Result`, and a recent `Result` will always beat an `Event`.
+
+## How I Keep The Top 10 Efficient
+
+Instead of sorting everything from scratch every time, I keep a heap of only 10 items.
+
+When a new notification arrives:
+
+1. If the heap has fewer than 10 items, insert it
+2. If the heap already has 10 items, compare the new notification with the lowest-ranked item
+3. If the new one is better, replace the weakest one
+
+That keeps the memory small and the update cost low, even if notifications keep streaming in.
+
+## Tradeoff
+
+This approach is fast and practical, but it is still a local ranking strategy. If the product later needs a more advanced scoring model, the scoring function can be expanded without changing the heap structure itself.
+
+## Code File
+
+The working implementation is in [stage6_priority_inbox.js](/Users/ranjithj/Documents/Campus-Evaluation-FS/notification-app-be/stage6_priority_inbox.js).
+
+It fetches notifications from the provided protected API, ranks them, and prints the top 10 priority notifications to the console.
+
+## Output And Screenshots
+
+Run the script from `notification-app-be` after setting either `NOTIFICATION_API_TOKEN` or the AffordMed auth variables: `AFFORDMED_EMAIL`, `AFFORDMED_NAME`, `AFFORDMED_ROLL_NO`, `AFFORDMED_ACCESS_CODE`, `AFFORDMED_CLIENT_ID`, and `AFFORDMED_CLIENT_SECRET`. Then capture screenshots of the terminal output showing the priority list.
+
+## Stage 6 Summary
+
+The main idea is to rank unread notifications by importance and recency without re-sorting the entire list every time. A min-heap keeps the top 10 efficient, and the scoring rule makes placement alerts rise above result updates, with events below both. That gives the student a cleaner Priority Inbox and keeps the update path light enough for notifications that keep arriving.
