@@ -892,3 +892,72 @@ This approach cuts down repeated database hits, avoids full-list reads when they
 ## Stage 4 Summary
 
 The main idea is simple: stop asking the database to rebuild the same notification view on every page load. Cache the repeated data, push new changes in real time, and load the older history only when the user asks for it. That keeps the database calmer and the app faster. Yes, it adds a bit of complexity, but it is the kind that usually pays for itself once the traffic starts climbing.
+
+# Stage 5
+
+## What Is Wrong With The Current Approach
+
+The current flow is doing everything in one go: send the email, save the record, and push the in-app alert for each student one after another. That feels straightforward on paper, but at 50,000 students it becomes slow and fragile very quickly.
+
+The real problem is that the work is tied together too tightly. If `send_email()` fails for 200 students halfway through, the system is left in a mixed state. Some students may already have the email, some may only be stored in the database, and some may not have been processed yet. That makes recovery messy and retries risky.
+
+It also does not show any batching, queueing, retry logic, or idempotency. Without those pieces, a big “Notify All” action depends too much on the email provider and the network behaving perfectly, which is not a safe bet.
+
+## What Should Happen When 200 Emails Fail
+
+If 200 emails fail midway, I would not stop the whole run and panic. I would record those 200 failures, keep the successful ones as they are, and retry the failed ones separately in the background.
+
+That way we do not lose the work already completed. The failed jobs can be retried with backoff, and if they keep failing, they can be pushed to a dead-letter queue for manual review.
+
+## Should Saving To DB And Sending Email Happen Together
+
+Not as one all-or-nothing step.
+
+Saving the notification and sending the email are related, but they are not the same thing. The database is the source of truth. The email is just a delivery attempt. If we force both into one tightly coupled flow, the whole process ends up waiting on a third-party API call, and that is exactly the kind of thing that makes bulk jobs flaky.
+
+I would save the notification first and then hand the delivery work over to a queue. That keeps the record safe even if the email service is slow or temporarily down.
+
+## Better Design
+
+For a “Notify All” action, I would keep the request light and push the actual delivery work into the background. The flow becomes much healthier if we write the notification once, store who it is meant for, hand off delivery jobs to a queue, and let workers send email plus in-app alerts asynchronously. We can still track per-student delivery status, but we do not make HR wait for 50,000 individual sends to finish.
+
+## Revised Pseudocode
+
+```text
+function notify_all(students, message):
+    notification_id = save_notification_to_db(message)
+
+    for student in students:
+        enqueue_delivery_job(
+            notification_id = notification_id,
+            student_id = student.id,
+            message = message
+        )
+
+    return "Notification scheduled"
+
+background_worker process_delivery_job(job):
+    try:
+        send_email(job.student_id, job.message)
+        push_to_app(job.student_id, job.message)
+        mark_delivery_status(job.notification_id, job.student_id, "sent")
+    except error:
+        mark_delivery_status(job.notification_id, job.student_id, "failed")
+        retry_or_queue_later(job)
+```
+
+## Why This Is Better
+
+This version is faster because HR is not sitting there waiting for 50,000 email calls to finish one by one. It is also safer because each delivery attempt has its own status, so a few failures do not spoil the entire batch.
+
+It also scales much better. If traffic spikes, we can run more workers. If the email provider slows down, the queue absorbs the pressure instead of freezing the request at the exact moment people need it most.
+
+## Tradeoffs
+
+This design is not free. It adds queues, workers, retries, and delivery tracking, so the system is more complex than a simple loop. There is also a small delay between scheduling and delivery because the background worker still has to pick up the job.
+
+Still, that tradeoff is worth it. At placement-season scale, reliability matters more than looking simple. A slightly delayed but dependable delivery flow is a lot better than a fast script that breaks halfway through and leaves everyone guessing.
+
+## Stage 5 Summary
+
+The current implementation is too synchronous and too fragile for 50,000 students. I would split persistence from delivery, save the notification first, and send email plus in-app delivery through a background queue. If 200 emails fail, those should be retried separately instead of pulling down the whole batch. Saving to the database and sending the email should stay separate because they fail in different ways and they do not need to happen at the exact same moment.
