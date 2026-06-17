@@ -856,3 +856,39 @@ ORDER BY created_at DESC;
 ## Stage 3 Summary
 
 The query works, but it will not age well on a table with millions of rows. The main improvements are simple: do not fetch every column, use a composite index that matches the filter and sort, and return rows in the order the inbox actually needs. Adding indexes everywhere sounds safe, but it usually slows writes down and wastes space. A few well-placed indexes are the better tradeoff. For the placement lookup, a straightforward filter on `notification_type = 'Placement'` and `created_at` is enough.
+
+# Stage 4
+
+## Problem
+
+If notifications are fetched on every page load for every student, the database keeps doing the same job over and over. That is wasteful, and once the table starts growing, the app begins to feel slow for no good reason.
+
+## Suggested Solution
+
+I would stop treating every page load like a fresh full fetch. A better approach is to keep a small cache for the things the UI checks often, load only the recent notifications by default, and rely on real-time updates for anything new. That way the app stays quick without making the user wait for a full database round trip every time.
+
+## Ways To Improve Performance
+
+The first thing I would add is a cache layer. Read-heavy values like unread counts and the latest notifications are perfect for Redis or any other fast in-memory store. The obvious win is speed, because the app stops hitting the database for the same values again and again. The downside is that cache invalidation becomes part of the problem, so you have to keep an eye on stale data.
+
+The second thing I would do is push live updates instead of making the client poll constantly. WebSocket or SSE is a much better fit when the only change is a brand-new notification. That keeps the experience snappy and cuts down read pressure, although it does make the system a little more involved to run and debug.
+
+I would also fetch only the pieces the UI actually needs. Most of the time, the frontend wants the unread count and the latest few notifications. It does not need the entire history on every load. This keeps payloads smaller and page loads faster, but it does mean the frontend has to handle partial loading and pagination properly.
+
+Cursor-based pagination helps here as well. It is a much better fit than offset pagination when notification lists grow large, because the database does not have to keep skipping farther and farther down the table. The tradeoff is that the client has to work with cursors instead of plain page numbers, which is a bit more code but usually worth it.
+
+If the volume keeps growing, I would also consider precomputing a few summary values such as unread counts or the latest placement notification. That gives the UI a fast way to show status without scanning the main table every time. The catch is that those summary values have to stay in sync with the source table.
+
+At a larger scale, read replicas can take some pressure off the primary database. That works well when most of the traffic is reading notifications, but replicas can lag a little, so they are not always the best place for the freshest write immediately after it happens.
+
+## Best Practical Approach
+
+If I had to keep it balanced, I would combine caching, recent-only fetches, cursor pagination, and real-time delivery. That gives the app the speed it needs without turning the architecture into something fragile or overcomplicated. The primary database can stay the source of truth, while the cache and live channel handle the everyday user experience.
+
+## What This Solves
+
+This approach cuts down repeated database hits, avoids full-list reads when they are not needed, and keeps badge counts from feeling sluggish. It also makes the app feel more alive, because the student sees new notifications almost immediately instead of waiting for the server to re-check everything from scratch.
+
+## Stage 4 Summary
+
+The main idea is simple: stop asking the database to rebuild the same notification view on every page load. Cache the repeated data, push new changes in real time, and load the older history only when the user asks for it. That keeps the database calmer and the app faster. Yes, it adds a bit of complexity, but it is the kind that usually pays for itself once the traffic starts climbing.
