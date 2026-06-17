@@ -1022,6 +1022,8 @@ It fetches notifications from the provided protected API, ranks them, and prints
 
 Run the script from `notification-app-be` after setting either `NOTIFICATION_API_TOKEN` or the AffordMed auth variables: `AFFORDMED_EMAIL`, `AFFORDMED_NAME`, `AFFORDMED_ROLL_NO`, `AFFORDMED_ACCESS_CODE`, `AFFORDMED_CLIENT_ID`, and `AFFORDMED_CLIENT_SECRET`. Then capture screenshots of the terminal output showing the priority list.
 
+The submitted output screenshot is [stage6_priority_output.png](/Users/ranjithj/Documents/Campus-Evaluation-FS/notification-app-be/stage6_priority_output.png).
+
 ## Stage 6 Summary
 
 The main idea is to rank unread notifications by importance and recency without re-sorting the entire list every time. A min-heap keeps the top 10 efficient, and the scoring rule makes placement alerts rise above result updates, with events below both. That gives the student a cleaner Priority Inbox and keeps the update path light enough for notifications that keep arriving.
