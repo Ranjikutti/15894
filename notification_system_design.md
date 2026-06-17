@@ -770,3 +770,89 @@ That said, for this stage, PostgreSQL is the better choice because the data is s
 ## Stage 2 Summary
 
 For this notification system, PostgreSQL is a strong default because it is simple, reliable, and easy to query from the Stage 1 API contract. The schema keeps notifications and preferences separated, supports real-time delivery, and leaves room to grow with indexes, pagination, partitioning, caching, and soft deletes.
+
+# Stage 3
+
+## Is the Query Accurate?
+
+The query is basically pointing in the right direction, but I would not call it ideal:
+
+```sql
+SELECT * FROM notifications
+WHERE studentID = 1042 AND isRead = false
+ORDER BY createdAt ASC;
+```
+
+It does the main job: it looks for one student, keeps only unread rows, and sorts by creation time. The part that feels rough is `SELECT *`, because that pulls every column whether the API needs them or not. I would also make sure the column names match the schema exactly. If the table uses `student_id`, `is_read`, and `created_at`, the query should stick to that pattern. And unless there is a specific reason to show the oldest unread notification first, ascending order is usually not the friendliest choice for a notification inbox.
+
+## Why It Is Slow
+
+With 5,000,000 notifications, the database starts feeling the weight of the table. If there is no helpful index, it has to look through a lot of rows to find the ones for student `1042`, then sort whatever it found. That gets slower when the student has a big notification history, and `SELECT *` makes it worse because the database has to read and move more data than the UI probably needs.
+
+In simple terms, the database is no longer dealing with a small inbox. It is dealing with a warehouse.
+
+## What I Would Change
+
+I would trim the query down to the fields the frontend actually needs and return the newest unread notifications first.
+
+```sql
+SELECT id, student_id, notification_type, title, message, created_at, is_read
+FROM notifications
+WHERE student_id = 1042
+  AND is_read = false
+ORDER BY created_at DESC;
+```
+
+That version is easier for the app to work with, and it puts the most relevant notification at the top. The real boost comes from a composite index:
+
+```sql
+CREATE INDEX idx_notifications_student_unread_created
+ON notifications (student_id, is_read, created_at DESC);
+```
+
+This gives the database a direct path to the unread notifications for one student, already in the order the inbox wants.
+
+## Likely Computation Cost
+
+The cost depends on whether the database has the right index. Without one, it is close to a full table scan, so the work is roughly `O(N)`, and sorting the matching rows adds something like `O(M log M)` on top. In that case, `N` is the total row count and `M` is the number of rows for that student that are still unread.
+
+With the composite index in place, the engine can jump to the relevant rows much faster, so the practical cost is closer to `O(log N + M)`. That is a much better place to be when the table is this big.
+
+## Should We Add Indexes on Every Column?
+
+No, that is not a good idea. Every index has a maintenance cost, so inserts, updates, and deletes get slower because the database has to keep those indexes in sync. They also take extra storage, and too many of them can make the optimizer work harder than it needs to. More importantly, not every column is actually useful for filtering or sorting.
+
+The better move is to add indexes around real query patterns. For this notification system, the most useful ones are usually:
+
+- `(student_id, is_read, created_at DESC)`
+- `(notification_type, created_at)`
+- Any foreign key columns used often in joins
+
+That gives us speed where it matters without turning writes into a maintenance headache.
+
+## Query For Placement Notifications In The Last 7 Days
+
+To find all students who received a placement notification in the last 7 days, filter by the `Placement` enum value and the time window.
+
+### SQL Query
+
+```sql
+SELECT DISTINCT student_id
+FROM notifications
+WHERE notification_type = 'Placement'
+  AND created_at >= NOW() - INTERVAL '7 days';
+```
+
+### If the team wants full notification rows
+
+```sql
+SELECT id, student_id, notification_type, title, message, created_at
+FROM notifications
+WHERE notification_type = 'Placement'
+  AND created_at >= NOW() - INTERVAL '7 days'
+ORDER BY created_at DESC;
+```
+
+## Stage 3 Summary
+
+The query works, but it will not age well on a table with millions of rows. The main improvements are simple: do not fetch every column, use a composite index that matches the filter and sort, and return rows in the order the inbox actually needs. Adding indexes everywhere sounds safe, but it usually slows writes down and wastes space. A few well-placed indexes are the better tradeoff. For the placement lookup, a straightforward filter on `notification_type = 'Placement'` and `created_at` is enough.
